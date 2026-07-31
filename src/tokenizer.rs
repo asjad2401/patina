@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use std::iter::Peekable;
 use std::str::Chars;
 
-
 pub fn tokenize(line: &str) -> Result<Vec<String>> {
     let mut chars = line.chars().peekable();
     let mut tokens = Vec::new();
@@ -17,6 +16,35 @@ pub fn tokenize(line: &str) -> Result<Vec<String>> {
                     tokens.push(std::mem::take(&mut current));
                     in_token = false;
                 }
+            }
+            '|' => {
+                chars.next();
+                if in_token {
+                    tokens.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+                tokens.push("|".to_string());
+            }
+            '>' => {
+                chars.next();
+                if in_token {
+                    tokens.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                    tokens.push(">>".to_string());
+                } else {
+                    tokens.push(">".to_string());
+                }
+            }
+            '<' => {
+                chars.next();
+                if in_token {
+                    tokens.push(std::mem::take(&mut current));
+                    in_token = false;
+                }
+                tokens.push("<".to_string());
             }
             '\'' => {
                 chars.next();
