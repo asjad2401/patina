@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,9 +12,14 @@ pub struct CommandRecord {
     pub resolved_path: String,
     pub binary_sha256: String,
     pub cwd: String,
+    pub env: HashMap<String, String>,
     pub timestamp: String,
     pub exit_code: Option<i32>,
     pub duration_ms: u128,
+}
+
+pub fn snapshot_env() -> HashMap<String, String> {
+    std::env::vars().collect()
 }
 
 pub fn new_session_log_path() -> PathBuf {

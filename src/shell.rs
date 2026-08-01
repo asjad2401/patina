@@ -1,5 +1,5 @@
 use crate::parser::{self, Command, StdoutRedirect};
-use crate::record::{append_record, CommandRecord};
+use crate::record::{append_record, snapshot_env, CommandRecord};
 use crate::resolve::{hash_file, resolve_binary};
 use crate::tokenizer::tokenize;
 use crate::ui;
@@ -171,6 +171,7 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
     let timestamp = chrono::Utc::now().to_rfc3339();
     let (stdin_file, stdout_file) = open_redirects(&command)?;
 
+    let env = snapshot_env();
     let start = Instant::now();
     let argv_c = build_argv(&command)?;
     let stdin_fd = stdin_file.as_ref().map(|f| f.as_raw_fd());
@@ -208,6 +209,7 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
             resolved_path: resolved.to_string_lossy().to_string(),
             binary_sha256: binary_hash,
             cwd: cwd.to_string_lossy().to_string(),
+            env,
             timestamp,
             exit_code,
             duration_ms,
@@ -219,6 +221,7 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
     let n = commands.len();
     let cwd = std::env::current_dir()?;
     let timestamp = chrono::Utc::now().to_rfc3339();
+    let env = snapshot_env();
 
     let mut resolved = Vec::with_capacity(n);
     let mut hashes = Vec::with_capacity(n);
@@ -305,6 +308,7 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
                 resolved_path: resolved[i].to_string_lossy().to_string(),
                 binary_sha256: hashes[i].clone(),
                 cwd: cwd.to_string_lossy().to_string(),
+                env: env.clone(),
                 timestamp: timestamp.clone(),
                 exit_code: exit_codes[i],
                 duration_ms,
