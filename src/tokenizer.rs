@@ -113,7 +113,6 @@ fn consume_double_quoted(chars: &mut Peekable<Chars>, out: &mut String) -> Resul
     }
 }
 
-
 fn expand_variable(chars: &mut Peekable<Chars>) -> String {
     if chars.peek() == Some(&'{') {
         chars.next(); // consume '{'

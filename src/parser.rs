@@ -25,7 +25,9 @@ pub fn parse_pipeline(tokens: Vec<String>) -> Result<Vec<Command>> {
     }
 
     if stages.iter().any(|s| s.is_empty()) {
-        return Err(anyhow!("empty command in pipeline (check for '||' or a stray '|')"));
+        return Err(anyhow!(
+            "empty command in pipeline (check for '||' or a stray '|')"
+        ));
     }
 
     stages.into_iter().map(parse).collect()

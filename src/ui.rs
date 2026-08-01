@@ -1,4 +1,3 @@
-
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
@@ -9,8 +8,7 @@ const FG_RED: &str = "\x1b[91m";
 const FG_YELLOW: &str = "\x1b[93m";
 
 const BG_MAGENTA: &str = "\x1b[45m";
-const BG_DARK: &str = "\x1b[48;5;236m"; 
-
+const BG_DARK: &str = "\x1b[48;5;236m";
 
 pub fn print_banner(log_path: &std::path::Path) {
     let cyan_bold = format!("{}{}", BOLD, FG_CYAN);
@@ -40,11 +38,7 @@ pub fn build_prompt(last_ok: bool, last_duration_ms: Option<u128>) -> String {
     let timing = timing_segment(last_duration_ms);
     let glyph_color = if last_ok { FG_CYAN } else { FG_RED };
 
-
-    let badge = format!(
-        "{}{} ⬡ patina {}{}",
-        BG_MAGENTA, FG_WHITE, RESET, RESET
-    );
+    let badge = format!("{}{} ⬡ patina {}{}", BG_MAGENTA, FG_WHITE, RESET, RESET);
 
     let cwd_part = format!("{}{} {} {}", BG_DARK, FG_CYAN, cwd, RESET);
 
@@ -75,7 +69,6 @@ pub fn print_warn(msg: &str) {
 pub fn print_signal(sig: &str) {
     eprintln!("{}{}  Killed by signal: {}{}", DIM, FG_RED, sig, RESET);
 }
-
 
 fn cwd_segment() -> String {
     let cwd = std::env::current_dir()

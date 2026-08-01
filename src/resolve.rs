@@ -13,15 +13,14 @@ pub fn resolve_binary(cmd: &str) -> Result<PathBuf> {
         };
     }
     let path_var = std::env::var("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var){
+    for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(cmd);
-        if is_executable(&candidate){
+        if is_executable(&candidate) {
             return Ok(candidate);
         }
     }
     Err(anyhow!("{}:command not found", cmd))
 }
-
 
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -30,7 +29,6 @@ fn is_executable(path: &Path) -> bool {
         Err(_) => false,
     }
 }
-
 
 pub fn hash_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path)?;
