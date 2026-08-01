@@ -1,8 +1,8 @@
-mod resolve;
+mod parser;
 mod record;
+mod resolve;
 mod shell;
 mod tokenizer;
-mod parser;
 mod ui;
 
 fn main() -> anyhow::Result<()> {

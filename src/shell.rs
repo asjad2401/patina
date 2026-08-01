@@ -4,7 +4,7 @@ use crate::resolve::{hash_file, resolve_binary};
 use crate::tokenizer::tokenize;
 use crate::ui;
 use anyhow::Result;
-use nix::sys::signal::{sigaction, SigAction, SaFlags, SigHandler, SigSet, Signal};
+use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::{dup2, execv, fork, pipe as nix_pipe, ForkResult, Pid};
 use rustyline::error::ReadlineError;
@@ -16,7 +16,6 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::time::Instant;
 
-
 fn reset_sigpipe_to_default() {
     unsafe {
         let _ = sigaction(
@@ -26,23 +25,19 @@ fn reset_sigpipe_to_default() {
     }
 }
 
-
 pub fn repl(log_path: &Path) -> Result<()> {
-
     let config = Config::builder()
         .history_ignore_space(true)
         .completion_type(CompletionType::List)
         .edit_mode(EditMode::Emacs)
         .build();
 
-    let mut rl: Editor<(), rustyline::history::FileHistory> =
-        Editor::with_config(config)?;
+    let mut rl: Editor<(), rustyline::history::FileHistory> = Editor::with_config(config)?;
 
     let history_path = dirs_home().map(|h| h.join(".patina_history"));
     if let Some(ref p) = history_path {
-        let _ = rl.load_history(p); 
+        let _ = rl.load_history(p);
     }
-
 
     let mut last_ok = true;
     let mut last_duration_ms: Option<u128> = None;
@@ -53,7 +48,6 @@ pub fn repl(log_path: &Path) -> Result<()> {
         let line = match rl.readline(&prompt) {
             Ok(l) => l,
             Err(ReadlineError::Interrupted) => {
-                
                 continue;
             }
             Err(ReadlineError::Eof) => {
@@ -141,7 +135,6 @@ pub fn repl(log_path: &Path) -> Result<()> {
     Ok(())
 }
 
-
 fn open_redirects(command: &Command) -> Result<(Option<File>, Option<File>)> {
     let stdin_file = match &command.stdin {
         Some(path) => Some(
@@ -170,8 +163,6 @@ fn open_redirects(command: &Command) -> Result<(Option<File>, Option<File>)> {
     };
     Ok((stdin_file, stdout_file))
 }
-
-
 
 fn run_single(command: Command, log_path: &Path) -> Result<()> {
     let resolved = resolve_binary(&command.cmd)?;
@@ -223,8 +214,6 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
         },
     )
 }
-
-
 
 fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
     let n = commands.len();
@@ -325,7 +314,6 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
 
     Ok(())
 }
-
 
 fn build_argv(command: &Command) -> Result<Vec<CString>> {
     let mut argv_c = Vec::with_capacity(command.args.len() + 1);
