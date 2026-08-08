@@ -1,4 +1,4 @@
-use crate::parser::{self, Command, StdoutRedirect};
+use crate::parser::{self, Command, StderrRedirect, StdoutRedirect};
 use crate::record::{append_record, snapshot_env, CommandRecord};
 use crate::resolve::{hash_file, resolve_binary};
 use crate::tokenizer::tokenize;
@@ -135,7 +135,14 @@ pub fn repl(log_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn open_redirects(command: &Command) -> Result<(Option<File>, Option<File>)> {
+enum StderrTarget {
+    File(File),
+    ToStdout,
+}
+
+fn open_redirects(
+    command: &Command,
+) -> Result<(Option<File>, Option<File>, Option<StderrTarget>)> {
     let stdin_file = match &command.stdin {
         Some(path) => Some(
             File::open(path)
@@ -161,7 +168,19 @@ fn open_redirects(command: &Command) -> Result<(Option<File>, Option<File>)> {
         ),
         None => None,
     };
-    Ok((stdin_file, stdout_file))
+    let stderr_target = match &command.stderr {
+        Some(StderrRedirect::Truncate(path)) => Some(StderrTarget::File(
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .map_err(|e| anyhow::anyhow!("cannot open '{}' for writing: {}", path, e))?,
+        )),
+        Some(StderrRedirect::ToStdout) => Some(StderrTarget::ToStdout),
+        None => None,
+    };
+    Ok((stdin_file, stdout_file, stderr_target))
 }
 
 fn run_single(command: Command, log_path: &Path) -> Result<()> {
@@ -169,13 +188,18 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
     let binary_hash = hash_file(&resolved)?;
     let cwd = std::env::current_dir()?;
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let (stdin_file, stdout_file) = open_redirects(&command)?;
+    let (stdin_file, stdout_file, stderr_target) = open_redirects(&command)?;
 
     let env = snapshot_env();
     let start = Instant::now();
     let argv_c = build_argv(&command)?;
     let stdin_fd = stdin_file.as_ref().map(|f| f.as_raw_fd());
     let stdout_fd = stdout_file.as_ref().map(|f| f.as_raw_fd());
+    let stderr_fd = match &stderr_target {
+        Some(StderrTarget::File(f)) => Some(f.as_raw_fd()),
+        _ => None,
+    };
+    let dup_stderr_to_stdout = matches!(stderr_target, Some(StderrTarget::ToStdout));
     let path_c = CString::new(resolved.to_string_lossy().as_bytes())?;
 
     let exit_code = match unsafe { fork() }? {
@@ -191,6 +215,14 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
                     std::process::exit(126);
                 }
             }
+            if let Some(fd) = stderr_fd {
+                if dup2(fd, 2).is_err() {
+                    std::process::exit(126);
+                }
+            }
+            if dup_stderr_to_stdout && dup2(1, 2).is_err() {
+                std::process::exit(126);
+            }
             let _ = execv(&path_c, &argv_c);
             std::process::exit(127);
         }
@@ -199,6 +231,7 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
 
     drop(stdin_file);
     drop(stdout_file);
+    drop(stderr_target);
 
     let duration_ms = start.elapsed().as_millis();
     append_record(
@@ -250,7 +283,7 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
     for (i, command) in commands.iter().enumerate() {
         let argv_c = build_argv(command)?;
         let path_c = CString::new(resolved[i].to_string_lossy().as_bytes())?;
-        let (stdin_file, stdout_file) = &redirects[i];
+        let (stdin_file, stdout_file, stderr_target) = &redirects[i];
 
         let read_end_from_prev = if i > 0 {
             Some(pipes[i - 1].0.as_raw_fd())
@@ -264,6 +297,11 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
         };
         let explicit_stdin = stdin_file.as_ref().map(|f| f.as_raw_fd());
         let explicit_stdout = stdout_file.as_ref().map(|f| f.as_raw_fd());
+        let explicit_stderr = match stderr_target {
+            Some(StderrTarget::File(f)) => Some(f.as_raw_fd()),
+            _ => None,
+        };
+        let dup_stderr_to_stdout = matches!(stderr_target, Some(StderrTarget::ToStdout));
 
         match unsafe { fork() }? {
             ForkResult::Child => {
@@ -279,6 +317,12 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
                 }
                 if let Some(fd) = explicit_stdout {
                     let _ = dup2(fd, 1);
+                }
+                if let Some(fd) = explicit_stderr {
+                    let _ = dup2(fd, 2);
+                }
+                if dup_stderr_to_stdout {
+                    let _ = dup2(1, 2);
                 }
                 for fd in &all_pipe_fds {
                     let _ = nix::unistd::close(*fd);

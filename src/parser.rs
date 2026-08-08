@@ -7,11 +7,18 @@ pub enum StdoutRedirect {
 }
 
 #[derive(Debug)]
+pub enum StderrRedirect {
+    Truncate(String),
+    ToStdout,
+}
+
+#[derive(Debug)]
 pub struct Command {
     pub cmd: String,
     pub args: Vec<String>,
     pub stdin: Option<String>,
     pub stdout: Option<StdoutRedirect>,
+    pub stderr: Option<StderrRedirect>,
 }
 
 pub fn parse_pipeline(tokens: Vec<String>) -> Result<Vec<Command>> {
@@ -37,6 +44,7 @@ pub fn parse(tokens: Vec<String>) -> Result<Command> {
     let mut argv: Vec<String> = Vec::new();
     let mut stdin = None;
     let mut stdout = None;
+    let mut stderr = None;
 
     let mut iter = tokens.into_iter();
     while let Some(tok) = iter.next() {
@@ -59,6 +67,15 @@ pub fn parse(tokens: Vec<String>) -> Result<Command> {
                     .ok_or_else(|| anyhow!("expected filename after '<'"))?;
                 stdin = Some(file);
             }
+            "2>" => {
+                let file = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("expected filename after '2>'"))?;
+                stderr = Some(StderrRedirect::Truncate(file));
+            }
+            "2>&1" => {
+                stderr = Some(StderrRedirect::ToStdout);
+            }
             _ => argv.push(tok),
         }
     }
@@ -73,5 +90,6 @@ pub fn parse(tokens: Vec<String>) -> Result<Command> {
         args: argv,
         stdin,
         stdout,
+        stderr,
     })
 }

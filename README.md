@@ -19,6 +19,7 @@ Early and under active development.
 - External command execution via `fork` + `execv` + `waitpid`
 - Pipelines: `cmd1 | cmd2 | cmd3`
 - I/O redirection: `>`, `>>`, `<`
+- Stderr redirection: `2>`, `2>&1`
 - Built-ins: `cd`, `exit`
 - Binary resolution + SHA-256 hashing for every command run
 - Per-command JSON session logging to `.patina/sessions/*.jsonl`
@@ -26,7 +27,6 @@ Early and under active development.
 
 **Not yet built:**
 
-- Stderr redirection (`2>`, `2>&1`)
 - Job control (`bg`, `fg`, `Ctrl+Z`)
 - Environment variable capture in session logs
 - Session export & replay

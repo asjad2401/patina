@@ -26,6 +26,21 @@ pub fn tokenize(line: &str) -> Result<Vec<String>> {
                 tokens.push("|".to_string());
             }
             '>' => {
+                if in_token && current == "2" {
+                    chars.next();
+                    current.clear();
+                    in_token = false;
+                    if chars.peek() == Some(&'&') {
+                        chars.next();
+                        match chars.next() {
+                            Some('1') => tokens.push("2>&1".to_string()),
+                            _ => return Err(anyhow!("expected '1' after '2>&'")),
+                        }
+                    } else {
+                        tokens.push("2>".to_string());
+                    }
+                    continue;
+                }
                 chars.next();
                 if in_token {
                     tokens.push(std::mem::take(&mut current));
