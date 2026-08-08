@@ -25,6 +25,7 @@ pub fn snapshot_env() -> HashMap<String, String> {
 pub fn new_session_log_path() -> PathBuf {
     let dir = PathBuf::from(".patina/sessions");
     let _ = std::fs::create_dir_all(&dir);
+    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
     dir.join(format!("{}.jsonl", ts))
 }
