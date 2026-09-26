@@ -1,20 +1,23 @@
 use crate::tokenizer::Token;
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StdoutRedirect {
     Truncate(String),
     Append(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StderrRedirect {
     Truncate(String),
     Append(String),
     ToStdout,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
     pub cmd: String,
     pub args: Vec<String>,

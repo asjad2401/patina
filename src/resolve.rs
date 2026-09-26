@@ -1,7 +1,10 @@
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 #[derive(Debug)]
 pub struct CommandNotFound(String);
@@ -33,7 +36,7 @@ pub fn resolve_binary(cmd: &str) -> Result<PathBuf> {
     Err(CommandNotFound(cmd.to_string()).into())
 }
 
-fn is_executable(path: &Path) -> bool {
+pub fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     match fs::metadata(path) {
         Ok(meta) => meta.is_file() && (meta.permissions().mode() & 0o111 != 0),
@@ -41,9 +44,33 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
+type CacheKey = (PathBuf, u64, Option<SystemTime>);
+
+static HASH_CACHE: Mutex<Option<HashMap<CacheKey, String>>> = Mutex::new(None);
+
+/// SHA-256 of a file, streamed. Binaries are hashed on every command, so
+/// results are cached by (path, size, mtime) — a rebuilt binary gets a new key.
 pub fn hash_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path)?;
+    let meta = fs::metadata(path)?;
+    let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
+    if let Some(hit) = HASH_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|c| c.get(&key))
+    {
+        return Ok(hit.clone());
+    }
+
+    let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(format!("{:x}", hasher.finalize()))
+    std::io::copy(&mut file, &mut hasher)?;
+    let digest = format!("{:x}", hasher.finalize());
+
+    HASH_CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(key, digest.clone());
+    Ok(digest)
 }

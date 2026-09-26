@@ -1,41 +1,17 @@
-use crate::parser::{self, Command, StderrRedirect, StdoutRedirect};
-use crate::record::{append_record, snapshot_env, CommandRecord};
+use crate::exec;
+use crate::parser::{self, Command};
+use crate::record::{BuiltinRecord, CommandRecord, Entry, FileWatch, Recorder, StageRecord};
 use crate::resolve::{hash_file, resolve_binary, CommandNotFound};
 use crate::tokenizer::{tokenize, Token};
 use crate::ui;
 use anyhow::Result;
-use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::{dup2, execv, fork, pipe as nix_pipe, ForkResult, Pid};
 use rustyline::error::ReadlineError;
 use rustyline::{CompletionType, Config, EditMode, Editor};
-use std::ffi::CString;
-use std::fs::{File, OpenOptions};
-
-use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Instant;
 
-fn set_signal(sig: Signal, handler: SigHandler) {
-    unsafe {
-        let _ = sigaction(
-            sig,
-            &SigAction::new(handler, SaFlags::empty(), SigSet::empty()),
-        );
-    }
-}
-
-// Ignored signals survive execv, so children must restore the defaults.
-fn reset_child_signals() {
-    for sig in [Signal::SIGPIPE, Signal::SIGINT, Signal::SIGQUIT] {
-        set_signal(sig, SigHandler::SigDfl);
-    }
-}
-
-pub fn repl(log_path: &Path) -> Result<i32> {
-    // Ctrl+C / Ctrl+\ hit the whole foreground process group; only the child should die.
-    set_signal(Signal::SIGINT, SigHandler::SigIgn);
-    set_signal(Signal::SIGQUIT, SigHandler::SigIgn);
+pub fn repl(recorder: &mut Recorder) -> Result<i32> {
+    exec::ignore_interactive_signals();
 
     let config = Config::builder()
         .history_ignore_space(true)
@@ -93,10 +69,18 @@ pub fn repl(log_path: &Path) -> Result<i32> {
             }
         };
 
-        if let Some(Token::Word(first)) = tokens.first() {
-            match first.as_str() {
-                "exit" => {
-                    if let Some(Token::Word(arg)) = tokens.get(1) {
+        // Built-ins only apply when they're the whole line, not a pipeline stage.
+        if !tokens.contains(&Token::Pipe) {
+            let words: Vec<String> = tokens
+                .iter()
+                .filter_map(|t| match t {
+                    Token::Word(w) => Some(w.clone()),
+                    _ => None,
+                })
+                .collect();
+            match words.first().map(String::as_str) {
+                Some("exit") => {
+                    if let Some(arg) = words.get(1) {
                         match arg.parse() {
                             Ok(code) => last_status = code,
                             Err(_) => {
@@ -112,18 +96,12 @@ pub fn repl(log_path: &Path) -> Result<i32> {
                     }
                     break;
                 }
-                "cd" => {
-                    let target = match tokens.get(1) {
-                        Some(Token::Word(dir)) => dir.clone(),
-                        _ => std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
+                Some("cd") => {
+                    last_status = if builtin_cd(&words[1..], recorder) {
+                        0
+                    } else {
+                        1
                     };
-                    match std::env::set_current_dir(&target) {
-                        Ok(()) => last_status = 0,
-                        Err(e) => {
-                            ui::print_error(&format!("cd: {}: {}", target, e));
-                            last_status = 1;
-                        }
-                    }
                     last_duration_ms = None;
                     continue;
                 }
@@ -142,16 +120,11 @@ pub fn repl(log_path: &Path) -> Result<i32> {
         };
 
         let t0 = Instant::now();
-        let result = if commands.len() == 1 {
-            run_single(commands.into_iter().next().unwrap(), log_path)
-        } else {
-            run_pipeline(commands, log_path)
-        };
+        let result = run_and_record(line, commands, recorder);
         last_duration_ms = Some(t0.elapsed().as_millis());
 
         match result {
-            // Killed by a signal: no exit code, but still a failure.
-            Ok(code) => last_status = code.unwrap_or(1),
+            Ok(status) => last_status = status,
             Err(e) => {
                 ui::print_error(&e.to_string());
                 last_status = if e.is::<CommandNotFound>() { 127 } else { 1 };
@@ -162,263 +135,93 @@ pub fn repl(log_path: &Path) -> Result<i32> {
     Ok(last_status)
 }
 
-enum StderrTarget {
-    File(File),
-    ToStdout,
-}
+fn builtin_cd(args: &[String], recorder: &Recorder) -> bool {
+    let before = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let target = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| ".".to_string()));
 
-fn open_redirects(command: &Command) -> Result<(Option<File>, Option<File>, Option<StderrTarget>)> {
-    let stdin_file = match &command.stdin {
-        Some(path) => Some(
-            File::open(path)
-                .map_err(|e| anyhow::anyhow!("cannot open '{}' for reading: {}", path, e))?,
-        ),
-        None => None,
-    };
-    let stdout_file = match &command.stdout {
-        Some(StdoutRedirect::Truncate(path)) => Some(
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(path)
-                .map_err(|e| anyhow::anyhow!("cannot open '{}' for writing: {}", path, e))?,
-        ),
-        Some(StdoutRedirect::Append(path)) => Some(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|e| anyhow::anyhow!("cannot open '{}' for appending: {}", path, e))?,
-        ),
-        None => None,
-    };
-    let stderr_target = match &command.stderr {
-        Some(StderrRedirect::Truncate(path)) => Some(StderrTarget::File(
-            OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(path)
-                .map_err(|e| anyhow::anyhow!("cannot open '{}' for writing: {}", path, e))?,
-        )),
-        Some(StderrRedirect::Append(path)) => Some(StderrTarget::File(
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|e| anyhow::anyhow!("cannot open '{}' for appending: {}", path, e))?,
-        )),
-        Some(StderrRedirect::ToStdout) => Some(StderrTarget::ToStdout),
-        None => None,
-    };
-    Ok((stdin_file, stdout_file, stderr_target))
-}
-
-fn run_single(command: Command, log_path: &Path) -> Result<Option<i32>> {
-    let resolved = resolve_binary(&command.cmd)?;
-    let binary_hash = hash_file(&resolved)?;
-    let cwd = std::env::current_dir()?;
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    let (stdin_file, stdout_file, stderr_target) = open_redirects(&command)?;
-
-    let env = snapshot_env();
-    let start = Instant::now();
-    let argv_c = build_argv(&command)?;
-    let stdin_fd = stdin_file.as_ref().map(|f| f.as_raw_fd());
-    let stdout_fd = stdout_file.as_ref().map(|f| f.as_raw_fd());
-    let stderr_fd = match &stderr_target {
-        Some(StderrTarget::File(f)) => Some(f.as_raw_fd()),
-        _ => None,
-    };
-    let dup_stderr_to_stdout = matches!(stderr_target, Some(StderrTarget::ToStdout));
-    let path_c = CString::new(resolved.to_string_lossy().as_bytes())?;
-
-    let exit_code = match unsafe { fork() }? {
-        ForkResult::Child => {
-            reset_child_signals();
-            if let Some(fd) = stdin_fd {
-                if dup2(fd, 0).is_err() {
-                    std::process::exit(126);
-                }
-            }
-            if let Some(fd) = stdout_fd {
-                if dup2(fd, 1).is_err() {
-                    std::process::exit(126);
-                }
-            }
-            if let Some(fd) = stderr_fd {
-                if dup2(fd, 2).is_err() {
-                    std::process::exit(126);
-                }
-            }
-            if dup_stderr_to_stdout && dup2(1, 2).is_err() {
-                std::process::exit(126);
-            }
-            let _ = execv(&path_c, &argv_c);
-            std::process::exit(127);
+    let ok = match std::env::set_current_dir(&target) {
+        Ok(()) => true,
+        Err(e) => {
+            ui::print_error(&format!("cd: {}: {}", target, e));
+            false
         }
-        ForkResult::Parent { child } => wait_for(child),
     };
 
-    drop(stdin_file);
-    drop(stdout_file);
-    drop(stderr_target);
-
-    let duration_ms = start.elapsed().as_millis();
-    append_record(
-        log_path,
-        &CommandRecord {
-            command: command.cmd,
-            args: command.args,
-            resolved_path: resolved.to_string_lossy().to_string(),
-            binary_sha256: binary_hash,
-            cwd: cwd.to_string_lossy().to_string(),
-            env,
-            timestamp,
-            exit_code,
-            duration_ms,
-        },
-    )?;
-    Ok(exit_code)
+    let entry = Entry::Builtin(BuiltinRecord {
+        name: "cd".into(),
+        args: args.to_vec(),
+        cwd: before,
+        new_cwd: std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().to_string()),
+        ok,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+    });
+    if let Err(e) = recorder.append(&entry) {
+        ui::print_error(&format!("could not write session log: {}", e));
+    }
+    ok
 }
 
-fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<Option<i32>> {
-    let n = commands.len();
+/// Runs one parsed line and logs it. Returns the last stage's status, like
+/// `$?` in other shells.
+fn run_and_record(line: &str, commands: Vec<Command>, recorder: &mut Recorder) -> Result<i32> {
     let cwd = std::env::current_dir()?;
     let timestamp = chrono::Utc::now().to_rfc3339();
-    let env = snapshot_env();
+    let env_diff = recorder.take_env_diff();
 
-    let mut resolved = Vec::with_capacity(n);
-    let mut hashes = Vec::with_capacity(n);
+    let mut resolved: Vec<PathBuf> = Vec::with_capacity(commands.len());
+    let mut hashes = Vec::with_capacity(commands.len());
     for c in &commands {
-        resolved.push(resolve_binary(&c.cmd)?);
-        hashes.push(hash_file(&resolved[resolved.len() - 1])?);
+        let path = resolve_binary(&c.cmd)?;
+        hashes.push(hash_file(&path)?);
+        resolved.push(path);
     }
 
-    let mut redirects = Vec::with_capacity(n);
-    for c in &commands {
-        redirects.push(open_redirects(c)?);
-    }
+    let watch = FileWatch::before(&commands, &cwd);
 
-    let mut pipes: Vec<(OwnedFd, OwnedFd)> = Vec::with_capacity(n.saturating_sub(1));
-    for _ in 0..n.saturating_sub(1) {
-        pipes.push(nix_pipe()?);
-    }
-    let all_pipe_fds: Vec<RawFd> = pipes
+    let start = Instant::now();
+    let stages: Vec<_> = commands
         .iter()
-        .flat_map(|(r, w)| [r.as_raw_fd(), w.as_raw_fd()])
+        .zip(&resolved)
+        .map(|(c, p)| (c, p.as_path()))
+        .collect();
+    let statuses = exec::run(&stages)?;
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    let files = watch.finish();
+    let status = statuses.last().map_or(1, |s| s.code());
+
+    let stages = commands
+        .into_iter()
+        .zip(resolved)
+        .zip(hashes)
+        .zip(&statuses)
+        .map(|(((command, path), hash), status)| StageRecord {
+            command,
+            resolved_path: path.to_string_lossy().to_string(),
+            binary_sha256: hash,
+            exit_code: status.exit_code(),
+            signal: status.signal_name(),
+        })
         .collect();
 
-    let start = Instant::now();
-    let mut child_pids: Vec<Pid> = Vec::with_capacity(n);
+    recorder.append(&Entry::Command(CommandRecord {
+        line: line.to_string(),
+        cwd: cwd.to_string_lossy().to_string(),
+        timestamp,
+        duration_ms,
+        env_diff,
+        stages,
+        files,
+    }))?;
 
-    for (i, command) in commands.iter().enumerate() {
-        let argv_c = build_argv(command)?;
-        let path_c = CString::new(resolved[i].to_string_lossy().as_bytes())?;
-        let (stdin_file, stdout_file, stderr_target) = &redirects[i];
-
-        let read_end_from_prev = if i > 0 {
-            Some(pipes[i - 1].0.as_raw_fd())
-        } else {
-            None
-        };
-        let write_end_to_next = if i < n - 1 {
-            Some(pipes[i].1.as_raw_fd())
-        } else {
-            None
-        };
-        let explicit_stdin = stdin_file.as_ref().map(|f| f.as_raw_fd());
-        let explicit_stdout = stdout_file.as_ref().map(|f| f.as_raw_fd());
-        let explicit_stderr = match stderr_target {
-            Some(StderrTarget::File(f)) => Some(f.as_raw_fd()),
-            _ => None,
-        };
-        let dup_stderr_to_stdout = matches!(stderr_target, Some(StderrTarget::ToStdout));
-
-        match unsafe { fork() }? {
-            ForkResult::Child => {
-                reset_child_signals();
-                if let Some(fd) = read_end_from_prev {
-                    let _ = dup2(fd, 0);
-                }
-                if let Some(fd) = explicit_stdin {
-                    let _ = dup2(fd, 0);
-                }
-                if let Some(fd) = write_end_to_next {
-                    let _ = dup2(fd, 1);
-                }
-                if let Some(fd) = explicit_stdout {
-                    let _ = dup2(fd, 1);
-                }
-                if let Some(fd) = explicit_stderr {
-                    let _ = dup2(fd, 2);
-                }
-                if dup_stderr_to_stdout {
-                    let _ = dup2(1, 2);
-                }
-                for fd in &all_pipe_fds {
-                    let _ = nix::unistd::close(*fd);
-                }
-                let _ = execv(&path_c, &argv_c);
-                std::process::exit(127);
-            }
-            ForkResult::Parent { child } => child_pids.push(child),
-        }
-    }
-
-    drop(pipes);
-    drop(redirects);
-
-    let mut exit_codes = Vec::with_capacity(n);
-    for pid in child_pids {
-        exit_codes.push(wait_for(pid));
-    }
-    let duration_ms = start.elapsed().as_millis();
-
-    for (i, command) in commands.into_iter().enumerate() {
-        append_record(
-            log_path,
-            &CommandRecord {
-                command: command.cmd,
-                args: command.args,
-                resolved_path: resolved[i].to_string_lossy().to_string(),
-                binary_sha256: hashes[i].clone(),
-                cwd: cwd.to_string_lossy().to_string(),
-                env: env.clone(),
-                timestamp: timestamp.clone(),
-                exit_code: exit_codes[i],
-                duration_ms,
-            },
-        )?;
-    }
-
-    Ok(exit_codes[n - 1])
-}
-
-fn build_argv(command: &Command) -> Result<Vec<CString>> {
-    let mut argv_c = Vec::with_capacity(command.args.len() + 1);
-    argv_c.push(CString::new(command.cmd.as_str())?);
-    for a in &command.args {
-        argv_c.push(CString::new(a.as_str())?);
-    }
-    Ok(argv_c)
-}
-
-fn wait_for(pid: Pid) -> Option<i32> {
-    match waitpid(pid, None) {
-        Ok(WaitStatus::Exited(_, code)) => Some(code),
-        Ok(WaitStatus::Signaled(_, Signal::SIGPIPE, _)) => None,
-        Ok(WaitStatus::Signaled(_, sig, _)) => {
-            ui::print_signal(&format!("{:?}", sig));
-            None
-        }
-        Ok(_) => None,
-        Err(e) => {
-            ui::print_error(&format!("waitpid failed: {}", e));
-            None
-        }
-    }
+    Ok(status)
 }
 
 fn dirs_home() -> Option<std::path::PathBuf> {
