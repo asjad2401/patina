@@ -2,78 +2,61 @@ use anyhow::{anyhow, Result};
 use std::iter::Peekable;
 use std::str::Chars;
 
-pub fn tokenize(line: &str) -> Result<Vec<String>> {
+#[derive(Debug, PartialEq)]
+pub enum Token {
+    Word(String),
+    Pipe,
+    In,
+    Out,
+    Append,
+    Stderr,
+    StderrAppend,
+    StderrToStdout,
+}
+
+pub fn tokenize(line: &str) -> Result<Vec<Token>> {
     let mut chars = line.chars().peekable();
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_token = false;
+    let mut quoted = false;
 
     while let Some(&c) = chars.peek() {
         match c {
-            ' ' | '\t' => {
+            ' ' | '\t' | '|' | '<' | '>' => {
                 chars.next();
-                if in_token {
-                    tokens.push(std::mem::take(&mut current));
-                    in_token = false;
-                }
-            }
-            '|' => {
-                chars.next();
-                if in_token {
-                    tokens.push(std::mem::take(&mut current));
-                    in_token = false;
-                }
-                tokens.push("|".to_string());
-            }
-            '>' => {
-                if in_token && current == "2" {
-                    chars.next();
+                // Only a bare, unquoted `2` right before `>` names stderr.
+                let stderr = c == '>' && in_token && !quoted && current == "2";
+                if stderr {
                     current.clear();
-                    in_token = false;
-                    if chars.peek() == Some(&'&') {
-                        chars.next();
-                        match chars.next() {
-                            Some('1') => tokens.push("2>&1".to_string()),
-                            _ => return Err(anyhow!("expected '1' after '2>&'")),
-                        }
-                    } else {
-                        tokens.push("2>".to_string());
-                    }
-                    continue;
+                } else if in_token {
+                    tokens.push(Token::Word(std::mem::take(&mut current)));
                 }
-                chars.next();
-                if in_token {
-                    tokens.push(std::mem::take(&mut current));
-                    in_token = false;
+                in_token = false;
+                quoted = false;
+                match c {
+                    '|' => tokens.push(Token::Pipe),
+                    '<' => tokens.push(Token::In),
+                    '>' => tokens.push(redirect_out(&mut chars, stderr)?),
+                    _ => {}
                 }
-                if chars.peek() == Some(&'>') {
-                    chars.next();
-                    tokens.push(">>".to_string());
-                } else {
-                    tokens.push(">".to_string());
-                }
-            }
-            '<' => {
-                chars.next();
-                if in_token {
-                    tokens.push(std::mem::take(&mut current));
-                    in_token = false;
-                }
-                tokens.push("<".to_string());
             }
             '\'' => {
                 chars.next();
                 in_token = true;
+                quoted = true;
                 consume_single_quoted(&mut chars, &mut current)?;
             }
             '"' => {
                 chars.next();
                 in_token = true;
+                quoted = true;
                 consume_double_quoted(&mut chars, &mut current)?;
             }
             '\\' => {
                 chars.next();
                 in_token = true;
+                quoted = true;
                 match chars.next() {
                     Some(escaped) => current.push(escaped),
                     None => return Err(anyhow!("dangling backslash at end of line")),
@@ -82,6 +65,7 @@ pub fn tokenize(line: &str) -> Result<Vec<String>> {
             '$' => {
                 chars.next();
                 in_token = true;
+                quoted = true;
                 current.push_str(&expand_variable(&mut chars));
             }
             _ => {
@@ -93,10 +77,27 @@ pub fn tokenize(line: &str) -> Result<Vec<String>> {
     }
 
     if in_token {
-        tokens.push(current);
+        tokens.push(Token::Word(current));
     }
 
     Ok(tokens)
+}
+
+fn redirect_out(chars: &mut Peekable<Chars>, stderr: bool) -> Result<Token> {
+    let append = chars.next_if_eq(&'>').is_some();
+    if !stderr {
+        return Ok(if append { Token::Append } else { Token::Out });
+    }
+    if append {
+        return Ok(Token::StderrAppend);
+    }
+    if chars.next_if_eq(&'&').is_some() {
+        return match chars.next() {
+            Some('1') => Ok(Token::StderrToStdout),
+            _ => Err(anyhow!("expected '1' after '2>&'")),
+        };
+    }
+    Ok(Token::Stderr)
 }
 
 fn consume_single_quoted(chars: &mut Peekable<Chars>, out: &mut String) -> Result<()> {
@@ -155,5 +156,53 @@ fn expand_variable(chars: &mut Peekable<Chars>) -> String {
         "$".to_string()
     } else {
         std::env::var(&name).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn word(s: &str) -> Token {
+        Token::Word(s.to_string())
+    }
+
+    #[test]
+    fn quoted_operators_are_words() {
+        assert_eq!(
+            tokenize(r#"echo '|' ">" \< '2'>f"#).unwrap(),
+            vec![
+                word("echo"),
+                word("|"),
+                word(">"),
+                word("<"),
+                word("2"),
+                Token::Out,
+                word("f")
+            ]
+        );
+    }
+
+    #[test]
+    fn operators() {
+        assert_eq!(
+            tokenize("a|b <i >o >>p 2>e 2>>f 2>&1").unwrap(),
+            vec![
+                word("a"),
+                Token::Pipe,
+                word("b"),
+                Token::In,
+                word("i"),
+                Token::Out,
+                word("o"),
+                Token::Append,
+                word("p"),
+                Token::Stderr,
+                word("e"),
+                Token::StderrAppend,
+                word("f"),
+                Token::StderrToStdout,
+            ]
+        );
     }
 }

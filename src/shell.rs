@@ -1,7 +1,7 @@
 use crate::parser::{self, Command, StderrRedirect, StdoutRedirect};
 use crate::record::{append_record, snapshot_env, CommandRecord};
 use crate::resolve::{hash_file, resolve_binary};
-use crate::tokenizer::tokenize;
+use crate::tokenizer::{tokenize, Token};
 use crate::ui;
 use anyhow::Result;
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
@@ -89,26 +89,25 @@ pub fn repl(log_path: &Path) -> Result<()> {
             }
         };
 
-        if tokens.len() == 1 || tokens.first().map(String::as_str) != Some("|") {
-            if let Some(first) = tokens.first() {
-                match first.as_str() {
-                    "exit" => break,
-                    "cd" => {
-                        let target = tokens.get(1).cloned().unwrap_or_else(|| {
-                            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-                        });
-                        match std::env::set_current_dir(&target) {
-                            Ok(()) => last_ok = true,
-                            Err(e) => {
-                                ui::print_error(&format!("cd: {}: {}", target, e));
-                                last_ok = false;
-                            }
+        if let Some(Token::Word(first)) = tokens.first() {
+            match first.as_str() {
+                "exit" => break,
+                "cd" => {
+                    let target = match tokens.get(1) {
+                        Some(Token::Word(dir)) => dir.clone(),
+                        _ => std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
+                    };
+                    match std::env::set_current_dir(&target) {
+                        Ok(()) => last_ok = true,
+                        Err(e) => {
+                            ui::print_error(&format!("cd: {}: {}", target, e));
+                            last_ok = false;
                         }
-                        last_duration_ms = None;
-                        continue;
                     }
-                    _ => {}
+                    last_duration_ms = None;
+                    continue;
                 }
+                _ => {}
             }
         }
 
@@ -187,6 +186,13 @@ fn open_redirects(
                 .truncate(true)
                 .open(path)
                 .map_err(|e| anyhow::anyhow!("cannot open '{}' for writing: {}", path, e))?,
+        )),
+        Some(StderrRedirect::Append(path)) => Some(StderrTarget::File(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| anyhow::anyhow!("cannot open '{}' for appending: {}", path, e))?,
         )),
         Some(StderrRedirect::ToStdout) => Some(StderrTarget::ToStdout),
         None => None,
