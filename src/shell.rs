@@ -16,16 +16,27 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::time::Instant;
 
-fn reset_sigpipe_to_default() {
+fn set_signal(sig: Signal, handler: SigHandler) {
     unsafe {
         let _ = sigaction(
-            Signal::SIGPIPE,
-            &SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty()),
+            sig,
+            &SigAction::new(handler, SaFlags::empty(), SigSet::empty()),
         );
     }
 }
 
+// Ignored signals survive execv, so children must restore the defaults.
+fn reset_child_signals() {
+    for sig in [Signal::SIGPIPE, Signal::SIGINT, Signal::SIGQUIT] {
+        set_signal(sig, SigHandler::SigDfl);
+    }
+}
+
 pub fn repl(log_path: &Path) -> Result<()> {
+    // Ctrl+C / Ctrl+\ hit the whole foreground process group; only the child should die.
+    set_signal(Signal::SIGINT, SigHandler::SigIgn);
+    set_signal(Signal::SIGQUIT, SigHandler::SigIgn);
+
     let config = Config::builder()
         .history_ignore_space(true)
         .completion_type(CompletionType::List)
@@ -204,7 +215,7 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
 
     let exit_code = match unsafe { fork() }? {
         ForkResult::Child => {
-            reset_sigpipe_to_default();
+            reset_child_signals();
             if let Some(fd) = stdin_fd {
                 if dup2(fd, 0).is_err() {
                     std::process::exit(126);
@@ -305,7 +316,7 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
 
         match unsafe { fork() }? {
             ForkResult::Child => {
-                reset_sigpipe_to_default();
+                reset_child_signals();
                 if let Some(fd) = read_end_from_prev {
                     let _ = dup2(fd, 0);
                 }
