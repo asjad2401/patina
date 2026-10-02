@@ -20,20 +20,22 @@ pub fn tokenize(line: &str) -> Result<Vec<Token>> {
     let mut current = String::new();
     let mut in_token = false;
     let mut quoted = false;
+    let mut expanded = false;
 
     while let Some(&c) = chars.peek() {
         match c {
             ' ' | '\t' | '|' | '<' | '>' => {
                 chars.next();
                 // Only a bare, unquoted `2` right before `>` names stderr.
-                let stderr = c == '>' && in_token && !quoted && current == "2";
+                let stderr = c == '>' && !quoted && !expanded && current == "2";
                 if stderr {
                     current.clear();
-                } else if in_token {
+                } else if keep_word(&current, quoted) {
                     tokens.push(Token::Word(std::mem::take(&mut current)));
                 }
                 in_token = false;
                 quoted = false;
+                expanded = false;
                 match c {
                     '|' => tokens.push(Token::Pipe),
                     '<' => tokens.push(Token::In),
@@ -65,8 +67,20 @@ pub fn tokenize(line: &str) -> Result<Vec<Token>> {
             '$' => {
                 chars.next();
                 in_token = true;
-                quoted = true;
+                expanded = true;
                 current.push_str(&expand_variable(&mut chars));
+            }
+            '~' if !in_token => {
+                chars.next();
+                in_token = true;
+                let ends_prefix = matches!(
+                    chars.peek(),
+                    None | Some('/' | ' ' | '\t' | '|' | '<' | '>')
+                );
+                match std::env::var("HOME") {
+                    Ok(home) if ends_prefix => current.push_str(&home),
+                    _ => current.push('~'),
+                }
             }
             _ => {
                 chars.next();
@@ -76,11 +90,16 @@ pub fn tokenize(line: &str) -> Result<Vec<Token>> {
         }
     }
 
-    if in_token {
+    if keep_word(&current, quoted) {
         tokens.push(Token::Word(current));
     }
 
     Ok(tokens)
+}
+
+// An unquoted expansion that comes out empty (`$UNSET`) is dropped, not passed as "".
+fn keep_word(word: &str, quoted: bool) -> bool {
+    quoted || !word.is_empty()
 }
 
 fn redirect_out(chars: &mut Peekable<Chars>, stderr: bool) -> Result<Token> {
@@ -180,6 +199,31 @@ mod tests {
                 Token::Out,
                 word("f")
             ]
+        );
+    }
+
+    #[test]
+    fn tilde_expands_only_at_word_start() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            tokenize("cd ~ ~/src a~ '~' \\~ ~user").unwrap(),
+            vec![
+                word("cd"),
+                word(&home),
+                word(&format!("{}/src", home)),
+                word("a~"),
+                word("~"),
+                word("~"),
+                word("~user")
+            ]
+        );
+    }
+
+    #[test]
+    fn unquoted_empty_expansion_is_dropped() {
+        assert_eq!(
+            tokenize(r#"echo a $PATINA_UNSET_VAR "$PATINA_UNSET_VAR" '' b"#).unwrap(),
+            vec![word("echo"), word("a"), word(""), word(""), word("b")]
         );
     }
 
