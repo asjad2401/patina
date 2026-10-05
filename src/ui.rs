@@ -88,7 +88,7 @@ fn cwd_segment() -> String {
     }
 }
 
-// Whole path components only, so /home/potato2 isn't treated as inside /home/potato.
+// Whole path components only, so /home/user2 isn't treated as inside /home/user.
 fn under_home<'a>(cwd: &'a str, home: &str) -> Option<&'a str> {
     let home = home.trim_end_matches('/');
     let rest = cwd.strip_prefix(home)?;
@@ -138,12 +138,9 @@ mod tests {
 
     #[test]
     fn home_prefix_matches_whole_components() {
-        assert_eq!(under_home("/home/potato", "/home/potato"), Some(""));
-        assert_eq!(
-            under_home("/home/potato/src", "/home/potato/"),
-            Some("/src")
-        );
-        assert_eq!(under_home("/home/potato2", "/home/potato"), None);
-        assert_eq!(under_home("/home/potato", ""), None);
+        assert_eq!(under_home("/home/user", "/home/user"), Some(""));
+        assert_eq!(under_home("/home/user/src", "/home/user/"), Some("/src"));
+        assert_eq!(under_home("/home/user2", "/home/user"), None);
+        assert_eq!(under_home("/home/user", ""), None);
     }
 }
