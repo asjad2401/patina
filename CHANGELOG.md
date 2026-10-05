@@ -26,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - Ctrl+C / Ctrl+\ while a command runs no longer kills patina
 - Prompt turns red when the last command exits non-zero; `command not found` exits with 127
+- Running a missing path (`./missing`) exits with 127, and a non-executable file or a directory with 126, each with bash's message
+- `cmd 2>&1 > file` keeps stderr on the terminal, since redirections now apply left to right
 - Quoted `|`, `<`, `>` are now treated as plain text instead of operators
 - Unset unquoted variables no longer become empty arguments
 - Built-ins (`cd`, `exit`) are only handled when they aren't part of a pipeline

@@ -67,6 +67,7 @@ fn reset_child_signals() {
 enum StderrTarget {
     File(File),
     ToStdout,
+    ToInheritedStdout,
 }
 
 struct Redirects {
@@ -103,6 +104,7 @@ fn open_redirects(command: &Command) -> Result<Redirects> {
         Some(StderrRedirect::Truncate(path)) => Some(StderrTarget::File(open_write(path, false)?)),
         Some(StderrRedirect::Append(path)) => Some(StderrTarget::File(open_write(path, true)?)),
         Some(StderrRedirect::ToStdout) => Some(StderrTarget::ToStdout),
+        Some(StderrRedirect::ToInheritedStdout) => Some(StderrTarget::ToInheritedStdout),
         None => None,
     };
     Ok(Redirects {
@@ -150,45 +152,47 @@ pub fn run(stages: &[(&Command, &Path)]) -> Result<Vec<Status>> {
 
         // Explicit redirections win over pipe ends, so apply them second.
         let mut stdin_fds = Vec::new();
-        let mut stdout_fds = Vec::new();
         if i > 0 {
             stdin_fds.push(pipes[i - 1].0.as_raw_fd());
         }
         if let Some(f) = &r.stdin {
             stdin_fds.push(f.as_raw_fd());
         }
-        if i < n - 1 {
-            stdout_fds.push(pipes[i].1.as_raw_fd());
-        }
-        if let Some(f) = &r.stdout {
-            stdout_fds.push(f.as_raw_fd());
-        }
+        let pipe_out = (i < n - 1).then(|| pipes[i].1.as_raw_fd());
+        let file_out = r.stdout.as_ref().map(|f| f.as_raw_fd());
         let stderr_fd = match &r.stderr {
             Some(StderrTarget::File(f)) => Some(f.as_raw_fd()),
             _ => None,
         };
-        let dup_stderr_to_stdout = matches!(r.stderr, Some(StderrTarget::ToStdout));
+        let stderr_early = matches!(r.stderr, Some(StderrTarget::ToInheritedStdout));
+        let stderr_late = matches!(r.stderr, Some(StderrTarget::ToStdout));
 
         match unsafe { fork() }? {
             ForkResult::Child => {
                 reset_child_signals();
+                let redirect = |from: RawFd, to: RawFd| {
+                    if dup2(from, to).is_err() {
+                        std::process::exit(126);
+                    }
+                };
                 for fd in stdin_fds {
-                    if dup2(fd, 0).is_err() {
-                        std::process::exit(126);
-                    }
+                    redirect(fd, 0);
                 }
-                for fd in stdout_fds {
-                    if dup2(fd, 1).is_err() {
-                        std::process::exit(126);
-                    }
+                if let Some(fd) = pipe_out {
+                    redirect(fd, 1);
+                }
+                // `2>&1 > f`: copy stdout to stderr before `> f` moves stdout.
+                if stderr_early {
+                    redirect(1, 2);
+                }
+                if let Some(fd) = file_out {
+                    redirect(fd, 1);
                 }
                 if let Some(fd) = stderr_fd {
-                    if dup2(fd, 2).is_err() {
-                        std::process::exit(126);
-                    }
+                    redirect(fd, 2);
                 }
-                if dup_stderr_to_stdout && dup2(1, 2).is_err() {
-                    std::process::exit(126);
+                if stderr_late {
+                    redirect(1, 2);
                 }
                 for fd in &all_pipe_fds {
                     let _ = nix::unistd::close(*fd);

@@ -86,3 +86,29 @@ fn stderr_append_is_recorded_and_replayable() {
     assert!(out.status.success(), "{}", text);
     assert!(text.contains("2 matched"), "{}", text);
 }
+
+#[test]
+fn stderr_dup_before_stdout_redirect_stays_on_the_terminal() {
+    // bash: `2>&1 > f` sends stderr to the old stdout, `> f 2>&1` into f.
+    let (o, dir) = run(
+        "dup_order",
+        "ls /patina_nope 2>&1 > early.txt\nls /patina_nope > late.txt 2>&1\n",
+    );
+    let early = std::fs::read_to_string(dir.join("early.txt")).unwrap();
+    let late = std::fs::read_to_string(dir.join("late.txt")).unwrap();
+    assert!(early.is_empty(), "early.txt: {}", early);
+    assert!(late.contains("patina_nope"), "late.txt: {}", late);
+    assert!(stdout(&o).contains("patina_nope"), "{}", stdout(&o));
+}
+
+#[test]
+fn missing_and_non_executable_paths() {
+    let dir = scratch("paths_setup");
+    std::fs::write(dir.join("noexec.sh"), "echo hi\n").unwrap();
+    let script = format!("{d}/noexec.sh\n", d = dir.display());
+    assert_eq!(run("noexec", &script).0.status.code(), Some(126));
+    assert_eq!(
+        run("missing", "./missing-script\n").0.status.code(),
+        Some(127)
+    );
+}

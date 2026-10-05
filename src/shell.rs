@@ -1,7 +1,7 @@
 use crate::exec;
 use crate::parser::{self, Command};
 use crate::record::{BuiltinRecord, CommandRecord, Entry, FileWatch, Recorder, StageRecord};
-use crate::resolve::{hash_file, resolve_binary, CommandNotFound};
+use crate::resolve::{hash_file, resolve_binary, ResolveError};
 use crate::tokenizer::{tokenize, Token};
 use crate::ui;
 use anyhow::Result;
@@ -127,7 +127,7 @@ pub fn repl(recorder: &mut Recorder) -> Result<i32> {
             Ok(status) => last_status = status,
             Err(e) => {
                 ui::print_error(&e.to_string());
-                last_status = if e.is::<CommandNotFound>() { 127 } else { 1 };
+                last_status = e.downcast_ref::<ResolveError>().map_or(1, |r| r.status());
             }
         }
     }

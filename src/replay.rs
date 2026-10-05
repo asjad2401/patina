@@ -100,6 +100,7 @@ impl Rebase {
                 StderrRedirect::Truncate(p) => StderrRedirect::Truncate(self.path(p)),
                 StderrRedirect::Append(p) => StderrRedirect::Append(self.path(p)),
                 StderrRedirect::ToStdout => StderrRedirect::ToStdout,
+                StderrRedirect::ToInheritedStdout => StderrRedirect::ToInheritedStdout,
             }),
         }
     }
