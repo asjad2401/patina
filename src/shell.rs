@@ -1,6 +1,6 @@
 use crate::parser::{self, Command, StderrRedirect, StdoutRedirect};
 use crate::record::{append_record, snapshot_env, CommandRecord};
-use crate::resolve::{hash_file, resolve_binary};
+use crate::resolve::{hash_file, resolve_binary, CommandNotFound};
 use crate::tokenizer::{tokenize, Token};
 use crate::ui;
 use anyhow::Result;
@@ -154,7 +154,7 @@ pub fn repl(log_path: &Path) -> Result<i32> {
             Ok(code) => last_status = code.unwrap_or(1),
             Err(e) => {
                 ui::print_error(&e.to_string());
-                last_status = 1;
+                last_status = if e.is::<CommandNotFound>() { 127 } else { 1 };
             }
         }
     }

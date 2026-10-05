@@ -76,8 +76,8 @@ fn cwd_segment() -> String {
         .unwrap_or_else(|_| "?".to_string());
 
     let home = std::env::var("HOME").unwrap_or_default();
-    if !home.is_empty() && cwd.starts_with(&home) {
-        format!("~{}", &cwd[home.len()..])
+    if let Some(rest) = under_home(&cwd, &home) {
+        format!("~{}", rest)
     } else {
         let parts: Vec<&str> = cwd.split('/').filter(|s| !s.is_empty()).collect();
         if parts.len() > 3 {
@@ -86,6 +86,13 @@ fn cwd_segment() -> String {
             cwd
         }
     }
+}
+
+// Whole path components only, so /home/potato2 isn't treated as inside /home/potato.
+fn under_home<'a>(cwd: &'a str, home: &str) -> Option<&'a str> {
+    let home = home.trim_end_matches('/');
+    let rest = cwd.strip_prefix(home)?;
+    (!home.is_empty() && (rest.is_empty() || rest.starts_with('/'))).then_some(rest)
 }
 
 fn git_segment() -> String {
@@ -122,5 +129,21 @@ fn timing_segment(duration_ms: Option<u128>) -> String {
             format!("took {:.1}s", secs)
         }
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::under_home;
+
+    #[test]
+    fn home_prefix_matches_whole_components() {
+        assert_eq!(under_home("/home/potato", "/home/potato"), Some(""));
+        assert_eq!(
+            under_home("/home/potato/src", "/home/potato/"),
+            Some("/src")
+        );
+        assert_eq!(under_home("/home/potato2", "/home/potato"), None);
+        assert_eq!(under_home("/home/potato", ""), None);
     }
 }

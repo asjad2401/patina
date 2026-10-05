@@ -3,6 +3,17 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug)]
+pub struct CommandNotFound(String);
+
+impl std::fmt::Display for CommandNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}: command not found", self.0)
+    }
+}
+
+impl std::error::Error for CommandNotFound {}
+
 pub fn resolve_binary(cmd: &str) -> Result<PathBuf> {
     if cmd.contains('/') {
         let p = PathBuf::from(cmd);
@@ -19,7 +30,7 @@ pub fn resolve_binary(cmd: &str) -> Result<PathBuf> {
             return Ok(candidate);
         }
     }
-    Err(anyhow!("{}:command not found", cmd))
+    Err(CommandNotFound(cmd.to_string()).into())
 }
 
 fn is_executable(path: &Path) -> bool {
