@@ -1,7 +1,7 @@
 use crate::parser::{self, Command, StderrRedirect, StdoutRedirect};
 use crate::record::{append_record, snapshot_env, CommandRecord};
-use crate::resolve::{hash_file, resolve_binary};
-use crate::tokenizer::tokenize;
+use crate::resolve::{hash_file, resolve_binary, CommandNotFound};
+use crate::tokenizer::{tokenize, Token};
 use crate::ui;
 use anyhow::Result;
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
@@ -16,16 +16,27 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::Path;
 use std::time::Instant;
 
-fn reset_sigpipe_to_default() {
+fn set_signal(sig: Signal, handler: SigHandler) {
     unsafe {
         let _ = sigaction(
-            Signal::SIGPIPE,
-            &SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty()),
+            sig,
+            &SigAction::new(handler, SaFlags::empty(), SigSet::empty()),
         );
     }
 }
 
-pub fn repl(log_path: &Path) -> Result<()> {
+// Ignored signals survive execv, so children must restore the defaults.
+fn reset_child_signals() {
+    for sig in [Signal::SIGPIPE, Signal::SIGINT, Signal::SIGQUIT] {
+        set_signal(sig, SigHandler::SigDfl);
+    }
+}
+
+pub fn repl(log_path: &Path) -> Result<i32> {
+    // Ctrl+C / Ctrl+\ hit the whole foreground process group; only the child should die.
+    set_signal(Signal::SIGINT, SigHandler::SigIgn);
+    set_signal(Signal::SIGQUIT, SigHandler::SigIgn);
+
     let config = Config::builder()
         .history_ignore_space(true)
         .completion_type(CompletionType::List)
@@ -39,11 +50,11 @@ pub fn repl(log_path: &Path) -> Result<()> {
         let _ = rl.load_history(p);
     }
 
-    let mut last_ok = true;
+    let mut last_status = 0;
     let mut last_duration_ms: Option<u128> = None;
 
     loop {
-        let prompt = ui::build_prompt(last_ok, last_duration_ms);
+        let prompt = ui::build_prompt(last_status == 0, last_duration_ms);
 
         let line = match rl.readline(&prompt) {
             Ok(l) => l,
@@ -60,44 +71,63 @@ pub fn repl(log_path: &Path) -> Result<()> {
             }
         };
 
-        let line = line.trim();
-        if line.is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
 
-        let _ = rl.add_history_entry(line);
+        // Keep the leading space: history_ignore_space uses it to skip the entry.
+        let _ = rl.add_history_entry(line.trim_end());
+        if let Some(ref p) = history_path {
+            let _ = rl.append_history(p);
+        }
+        let line = line.trim();
 
         let tokens = match tokenize(line) {
             Ok(t) if t.is_empty() => continue,
             Ok(t) => t,
             Err(e) => {
                 ui::print_error(&format!("parse error: {}", e));
-                last_ok = false;
+                last_status = 1;
                 last_duration_ms = None;
                 continue;
             }
         };
 
-        if tokens.len() == 1 || tokens.first().map(String::as_str) != Some("|") {
-            if let Some(first) = tokens.first() {
-                match first.as_str() {
-                    "exit" => break,
-                    "cd" => {
-                        let target = tokens.get(1).cloned().unwrap_or_else(|| {
-                            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-                        });
-                        match std::env::set_current_dir(&target) {
-                            Ok(()) => last_ok = true,
-                            Err(e) => {
-                                ui::print_error(&format!("cd: {}: {}", target, e));
-                                last_ok = false;
+        if let Some(Token::Word(first)) = tokens.first() {
+            match first.as_str() {
+                "exit" => {
+                    if let Some(Token::Word(arg)) = tokens.get(1) {
+                        match arg.parse() {
+                            Ok(code) => last_status = code,
+                            Err(_) => {
+                                ui::print_error(&format!(
+                                    "exit: {}: numeric argument required",
+                                    arg
+                                ));
+                                last_status = 1;
+                                last_duration_ms = None;
+                                continue;
                             }
                         }
-                        last_duration_ms = None;
-                        continue;
                     }
-                    _ => {}
+                    break;
                 }
+                "cd" => {
+                    let target = match tokens.get(1) {
+                        Some(Token::Word(dir)) => dir.clone(),
+                        _ => std::env::var("HOME").unwrap_or_else(|_| ".".to_string()),
+                    };
+                    match std::env::set_current_dir(&target) {
+                        Ok(()) => last_status = 0,
+                        Err(e) => {
+                            ui::print_error(&format!("cd: {}: {}", target, e));
+                            last_status = 1;
+                        }
+                    }
+                    last_duration_ms = None;
+                    continue;
+                }
+                _ => {}
             }
         }
 
@@ -105,7 +135,7 @@ pub fn repl(log_path: &Path) -> Result<()> {
             Ok(c) => c,
             Err(e) => {
                 ui::print_error(&e.to_string());
-                last_ok = false;
+                last_status = 1;
                 last_duration_ms = None;
                 continue;
             }
@@ -120,19 +150,16 @@ pub fn repl(log_path: &Path) -> Result<()> {
         last_duration_ms = Some(t0.elapsed().as_millis());
 
         match result {
-            Ok(()) => last_ok = true,
+            // Killed by a signal: no exit code, but still a failure.
+            Ok(code) => last_status = code.unwrap_or(1),
             Err(e) => {
                 ui::print_error(&e.to_string());
-                last_ok = false;
+                last_status = if e.is::<CommandNotFound>() { 127 } else { 1 };
             }
         }
     }
 
-    if let Some(ref p) = history_path {
-        let _ = rl.save_history(p);
-    }
-
-    Ok(())
+    Ok(last_status)
 }
 
 enum StderrTarget {
@@ -140,9 +167,7 @@ enum StderrTarget {
     ToStdout,
 }
 
-fn open_redirects(
-    command: &Command,
-) -> Result<(Option<File>, Option<File>, Option<StderrTarget>)> {
+fn open_redirects(command: &Command) -> Result<(Option<File>, Option<File>, Option<StderrTarget>)> {
     let stdin_file = match &command.stdin {
         Some(path) => Some(
             File::open(path)
@@ -177,13 +202,20 @@ fn open_redirects(
                 .open(path)
                 .map_err(|e| anyhow::anyhow!("cannot open '{}' for writing: {}", path, e))?,
         )),
+        Some(StderrRedirect::Append(path)) => Some(StderrTarget::File(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|e| anyhow::anyhow!("cannot open '{}' for appending: {}", path, e))?,
+        )),
         Some(StderrRedirect::ToStdout) => Some(StderrTarget::ToStdout),
         None => None,
     };
     Ok((stdin_file, stdout_file, stderr_target))
 }
 
-fn run_single(command: Command, log_path: &Path) -> Result<()> {
+fn run_single(command: Command, log_path: &Path) -> Result<Option<i32>> {
     let resolved = resolve_binary(&command.cmd)?;
     let binary_hash = hash_file(&resolved)?;
     let cwd = std::env::current_dir()?;
@@ -204,7 +236,7 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
 
     let exit_code = match unsafe { fork() }? {
         ForkResult::Child => {
-            reset_sigpipe_to_default();
+            reset_child_signals();
             if let Some(fd) = stdin_fd {
                 if dup2(fd, 0).is_err() {
                     std::process::exit(126);
@@ -247,10 +279,11 @@ fn run_single(command: Command, log_path: &Path) -> Result<()> {
             exit_code,
             duration_ms,
         },
-    )
+    )?;
+    Ok(exit_code)
 }
 
-fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
+fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<Option<i32>> {
     let n = commands.len();
     let cwd = std::env::current_dir()?;
     let timestamp = chrono::Utc::now().to_rfc3339();
@@ -305,7 +338,7 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
 
         match unsafe { fork() }? {
             ForkResult::Child => {
-                reset_sigpipe_to_default();
+                reset_child_signals();
                 if let Some(fd) = read_end_from_prev {
                     let _ = dup2(fd, 0);
                 }
@@ -360,7 +393,7 @@ fn run_pipeline(commands: Vec<Command>, log_path: &Path) -> Result<()> {
         )?;
     }
 
-    Ok(())
+    Ok(exit_codes[n - 1])
 }
 
 fn build_argv(command: &Command) -> Result<Vec<CString>> {

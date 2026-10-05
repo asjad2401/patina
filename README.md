@@ -15,20 +15,19 @@ Early and under active development.
 **Working:**
 
 - REPL loop with readline editing (Emacs keybindings, `↑↓` history, `Ctrl+R` search)
-- Tokenizer: single/double quotes, `$VAR` / `${VAR}` expansion, backslash escaping
+- Tokenizer: single/double quotes, `$VAR` / `${VAR}` expansion, `~` expansion, backslash escaping
 - External command execution via `fork` + `execv` + `waitpid`
 - Pipelines: `cmd1 | cmd2 | cmd3`
 - I/O redirection: `>`, `>>`, `<`
-- Stderr redirection: `2>`, `2>&1`
-- Built-ins: `cd`, `exit`
+- Stderr redirection: `2>`, `2>>`, `2>&1`
+- Built-ins: `cd`, `exit [n]`
 - Binary resolution + SHA-256 hashing for every command run
-- Per-command JSON session logging to `.patina/sessions/*.jsonl`
-- Colored prompt with cwd, git branch, and last-command timing
+- Per-command JSON session logging to `.patina/sessions/*.jsonl`, including an environment snapshot
+- Colored prompt with cwd, git branch, last-command timing, and a red `❯` when the last command failed
 
 **Not yet built:**
 
 - Job control (`bg`, `fg`, `Ctrl+Z`)
-- Environment variable capture in session logs
 - Session export & replay
 
 ## Build & run
@@ -67,11 +66,14 @@ Each session writes a `.patina/sessions/<timestamp>.jsonl` file. Every command i
   "resolved_path": "/usr/bin/grep",
   "binary_sha256": "a3f1...",
   "cwd": "/home/you/project",
+  "env": { "PATH": "/usr/local/bin:/usr/bin:/bin", "GITHUB_TOKEN": "<redacted>", "...": "..." },
   "timestamp": "2026-08-01T10:00:00Z",
   "exit_code": 0,
   "duration_ms": 12
 }
 ```
+
+Environment variables whose names look secret (containing `TOKEN`, `SECRET`, `KEY`, `PASS`, `CREDENTIAL`, `AUTH` or `PRIVATE`), and any value with a password inside a URL, are logged as `<redacted>`. Log files are created readable only by you (`0600`).
 
 The SHA-256 hash of each binary is the key primitive for future replay: it lets patina verify at replay time that the exact same binary is being used, or warn when it isn't.
 
