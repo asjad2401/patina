@@ -1,20 +1,28 @@
 use crate::tokenizer::Token;
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StdoutRedirect {
     Truncate(String),
     Append(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StderrRedirect {
     Truncate(String),
     Append(String),
+    /// `2>&1` after any stdout redirection: stderr follows stdout's final target.
     ToStdout,
+    /// `2>&1` before a stdout redirection (`cmd 2>&1 > f`): redirections apply
+    /// left to right, so stderr goes where stdout pointed *before* `> f`
+    /// (the terminal or the pipe), not into `f`.
+    ToInheritedStdout,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Command {
     pub cmd: String,
     pub args: Vec<String>,
@@ -59,13 +67,24 @@ pub fn parse(tokens: Vec<Token>) -> Result<Command> {
             Token::StderrAppend => {
                 stderr = Some(StderrRedirect::Append(filename(&mut iter, "2>>")?))
             }
-            Token::StderrToStdout => stderr = Some(StderrRedirect::ToStdout),
+            Token::StderrToStdout => {
+                stderr = Some(if stdout.is_some() {
+                    StderrRedirect::ToStdout
+                } else {
+                    StderrRedirect::ToInheritedStdout
+                })
+            }
             Token::Pipe => return Err(anyhow!("unexpected '|'")),
         }
     }
 
     if argv.is_empty() {
         return Err(anyhow!("empty command after removing redirections"));
+    }
+
+    // Without a stdout redirection the two forms mean the same thing.
+    if stdout.is_none() && matches!(stderr, Some(StderrRedirect::ToInheritedStdout)) {
+        stderr = Some(StderrRedirect::ToStdout);
     }
 
     let cmd = argv.remove(0);
@@ -106,6 +125,19 @@ mod tests {
         let cmd = &parse_line("ls missing 2>>err.log").unwrap()[0];
         assert_eq!(cmd.args, ["missing"]);
         assert!(matches!(&cmd.stderr, Some(StderrRedirect::Append(f)) if f == "err.log"));
+    }
+
+    #[test]
+    fn stderr_dup_respects_order() {
+        let late = &parse_line("ls > f 2>&1").unwrap()[0];
+        assert!(matches!(late.stderr, Some(StderrRedirect::ToStdout)));
+        let early = &parse_line("ls 2>&1 > f").unwrap()[0];
+        assert!(matches!(
+            early.stderr,
+            Some(StderrRedirect::ToInheritedStdout)
+        ));
+        let alone = &parse_line("ls 2>&1").unwrap()[0];
+        assert!(matches!(alone.stderr, Some(StderrRedirect::ToStdout)));
     }
 
     #[test]

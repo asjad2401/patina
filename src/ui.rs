@@ -6,6 +6,7 @@ const FG_WHITE: &str = "\x1b[97m";
 const FG_CYAN: &str = "\x1b[96m";
 const FG_RED: &str = "\x1b[91m";
 const FG_YELLOW: &str = "\x1b[93m";
+const FG_GREEN: &str = "\x1b[92m";
 
 const BG_MAGENTA: &str = "\x1b[45m";
 const BG_DARK: &str = "\x1b[48;5;236m";
@@ -21,7 +22,7 @@ pub fn print_banner(log_path: &std::path::Path) {
 {c} ██║     ██║  ██║   ██║   ██║██║ ╚████║██║  ██║{r}
 {c} ╚═╝     ╚═╝  ╚═╝   ╚═╝   ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝{r}
 {dim}  A smarter shell  ·  v{ver}  ·  log → {log}{r}
-{dim}  ↑↓ history  ·  Ctrl+R search  ·  type 'exit' to quit{r}
+{dim}  ↑↓ history  ·  Ctrl+R search  ·  'exit' to quit  ·  'patina replay' to replay{r}
 "#,
         c = cyan_bold,
         r = RESET,
@@ -62,9 +63,23 @@ pub fn build_prompt(last_ok: bool, last_duration_ms: Option<u128>) -> String {
 pub fn print_error(msg: &str) {
     eprintln!("{}{}✗  patina: {}{}", BOLD, FG_RED, msg, RESET);
 }
-#[allow(dead_code)]
 pub fn print_warn(msg: &str) {
-    eprintln!("{}⚠  patina: {}{}", FG_YELLOW, msg, RESET);
+    println!("   {}⚠ {}{}", FG_YELLOW, msg, RESET);
+}
+pub fn print_ok(msg: &str) {
+    println!("   {}✓ {}{}", FG_GREEN, msg, RESET);
+}
+pub fn print_fail(msg: &str) {
+    println!("   {}✗ {}{}", FG_RED, msg, RESET);
+}
+pub fn print_note(msg: &str) {
+    println!("   {}{}{}", DIM, msg, RESET);
+}
+pub fn bold(s: &str) -> String {
+    format!("{}{}{}", BOLD, s, RESET)
+}
+pub fn dim(s: &str) -> String {
+    format!("{}{}{}", DIM, s, RESET)
 }
 pub fn print_signal(sig: &str) {
     eprintln!("{}{}  Killed by signal: {}{}", DIM, FG_RED, sig, RESET);
