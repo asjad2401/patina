@@ -71,12 +71,16 @@ pub fn repl(log_path: &Path) -> Result<i32> {
             }
         };
 
-        let line = line.trim();
-        if line.is_empty() {
+        if line.trim().is_empty() {
             continue;
         }
 
-        let _ = rl.add_history_entry(line);
+        // Keep the leading space: history_ignore_space uses it to skip the entry.
+        let _ = rl.add_history_entry(line.trim_end());
+        if let Some(ref p) = history_path {
+            let _ = rl.append_history(p);
+        }
+        let line = line.trim();
 
         let tokens = match tokenize(line) {
             Ok(t) if t.is_empty() => continue,
@@ -153,10 +157,6 @@ pub fn repl(log_path: &Path) -> Result<i32> {
                 last_status = 1;
             }
         }
-    }
-
-    if let Some(ref p) = history_path {
-        let _ = rl.save_history(p);
     }
 
     Ok(last_status)
