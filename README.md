@@ -95,6 +95,10 @@ For each command line, replay checks that the recorded binary is still byte-iden
 
 With `--cwd`, recorded absolute paths under the session's starting directory (working directories, arguments, redirections) are mapped into the new directory, so you can replay into a scratch copy instead of your real project. Replay exits `1` if anything differed. Values that were redacted at record time come from your current environment.
 
+## Roadmap & contributing
+
+See **[DEVLOG.md](DEVLOG.md)** for planned features (with sizes and pointers into the code, and ⭐ marking good first contributions), the project's history, and how to contribute.
+
 ## Why
 
 Built as a learning project to understand what a shell does at the syscall level (`fork`, `exec`, `dup2`, `pipe`), with a real end goal layered on top: making terminal sessions reproducible the way containers made environments reproducible.
